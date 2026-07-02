@@ -1237,7 +1237,9 @@
 		margin: 0;
 		background-color: #0a0e14;
 		color: var(--text);
-		font-family: "Garamond", "Georgia", "Playfair Display", serif;
+		/* font-family: "Garamond", "Georgia", "Playfair Display", serif; */
+		  font-family: "Lato", "Helvetica Neue", Helvetica, Arial, sans-serif;
+
 		overflow: hidden;
 		height: 100vh;
 		display: flex;
