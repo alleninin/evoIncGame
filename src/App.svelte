@@ -22,7 +22,8 @@
 		directedMigrationReady: false,
 		oceanSpread: false,
 		speciesName: 'ALPHA-GENUS',
-		peakTerritories: 0
+		peakTerritories: 0,
+		regions: 0
 	});
 
 	// UI state
@@ -31,47 +32,45 @@
 	let showEvolution = $state(false);
 	let showEndgame = $state(false);
 	let showQuiz = $state(false);
-	let endgameData = $state({ won: false, title: '', stats: '', msg: '' });
+	let endgameData = $state({ won: false, title: '', lines: [] });
 
 	let sidePanel = $state({
-		title: 'Select a Region',
+		title: null,
 		climate: '-',
 		temp: '-',
 		pred: '-',
-		status: '-'
+		occupied: false
 	});
 
 	let logEntries = $state([]);
-	let eventBanner = $state({ visible: false, msg: '', color: '#ff4d4d' });
+	let eventBanner = $state({ visible: false, title: '', msg: '', tone: 'info' });
+	let bannerTimer;
 	let speciesInputVal = $state('');
+	let selectedTraitId = $state(null);
 
 	// Quiz state
 	let currentQuestionIndex = $state(0);
 
 	let answeredCurrent = $state(false);
+	let selectedAnswer = $state(null);
 	let quizQuestion = $state(null);
-	let quizFeedback = $state({ msg: '', color: '' });
+	let quizFeedback = $state({ correct: null, msg: '' });
 	let quizShowNext = $state(false);
 
 	// Map internals (not reactive — managed by D3)
 	let mapContainer;
+	let svgEl;
 
-	let svg, g, path, projection;
+	let svg, g, path, projection, earthImage;
 	let countriesData = null;
 	const occupiedCountries = new Set();
 	const landNeighbors = new Map();
 
 	// ─── Constants ─────────────────────────────────────────────────────────────
-	const climateColors = {
-		Tropical: '#2d6a4f',
-		Desert: '#e9c46a',
-		Arid: '#d4a373',
-		Temperate: '#74c69d',
-		Tundra: '#a8dadc',
-		Subarctic: '#457b9d',
-		Mediterranean: '#f4a261',
-		Highland: '#6d6875'
-	};
+	// NASA Blue Marble (public domain), equirectangular, served from jsDelivr.
+	const EARTH_IMAGE_URL = 'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/earth-blue-marble.jpg';
+	const LAT_TOP = 84;
+	const LAT_BOTTOM = -72;
 
 	const problemCountries = {
 		Egypt: 'Desert',
@@ -98,50 +97,78 @@
 	];
 
 	const strategyLabels = {
-		type1: 'Type I (K-Selection)',
+		type1: 'Type I (K-selected)',
 		type2: 'Type II',
-		type3: 'Type III (r-Selection)'
+		type3: 'Type III (r-selected)'
 	};
+
+	const strategies = [
+		{
+			key: 'type1',
+			name: 'Type I',
+			sub: 'K-selected',
+			curve: 'M4,8 C70,8 110,10 128,26 S150,80 156,84',
+			desc: 'Most individuals live to old age. Parents have a few young and put a lot into each one, like humans and elephants.',
+			starts: 'Starts with high intelligence. Brain traits come first.'
+		},
+		{
+			key: 'type2',
+			name: 'Type II',
+			sub: 'Constant mortality',
+			curve: 'M4,8 L156,84',
+			desc: 'An individual is about as likely to die at one age as any other. Songbirds and many rodents follow this curve.',
+			starts: 'Balanced spread and intelligence, with the widest trait tree.'
+		},
+		{
+			key: 'type3',
+			name: 'Type III',
+			sub: 'r-selected',
+			curve: 'M4,8 C10,62 22,78 56,81 L156,84',
+			desc: 'Almost every offspring dies young, so parents produce enormous numbers of them. Fish and most insects work this way.',
+			starts: 'Starts with fast spread and low intelligence.'
+		}
+	];
 
 	const randomEvents = [
 		{
-			name: '❄️ Ice Age',
-			color: '#88ccff',
-			message: (lost) => `ICE AGE! ${lost} tundra/subarctic regions lost ☠️☠️☠️☠️☠️☠️. Cold Resistance helped.`,
-			noop: () => 'ICE AGE began, but your Cold Resistance protected all territories!',
+			name: 'Ice age',
+			tone: 'info',
+			message: (lost) => `Lost ${lost} cold region${lost === 1 ? '' : 's'} to the ice.`,
+			noop: () => 'No regions lost.',
 			filter: (c) => c === 'Tundra' || c === 'Subarctic',
 			resist: () => gameState.coldResistance
 		},
 
 		{
-			name: '🌋 Supervolcano',
-			color: '#ff6622',
-			message: (lost) => `SUPERVOLCANO! ${lost} desert/arid regions devastated ☠️☠️☠️☠️☠️☠️. Heat Resistance helped.`,
-			noop: () => 'SUPERVOLCANO erupted, but your Heat Resistance shielded your desert populations!',
+			name: 'Supervolcano',
+			tone: 'danger',
+			message: (lost) => `Ash buried ${lost} desert region${lost === 1 ? '' : 's'}.`,
+			noop: () => 'No regions lost.',
 			filter: (c) => c === 'Desert' || c === 'Arid',
 			resist: () => gameState.heatResistance
 		},
 
 		{
-			name: '☀️ Mega Drought',
-			color: '#e9c46a',
-			message: (lost) => `MEGA DROUGHT! ${lost} regions desertified and lost ☠️☠️☠️☠️☠️. Heat Resistance helped.`,
-			noop: () => 'MEGA DROUGHT struck, your Heat Resistance kept populations alive!',
+			name: 'Megadrought',
+			tone: 'warn',
+			message: (lost) => `${lost} temperate region${lost === 1 ? '' : 's'} dried out.`,
+			noop: () => 'No regions lost.',
 			filter: (c) => c === 'Temperate' || c === 'Mediterranean',
 			resist: () => gameState.heatResistance
 		},
 
 		{
-			name: '🌊 Sea Level Rise',
-			color: '#0077cc',
-			message: (lost) => `SEA LEVEL RISE! ${lost} coastal regions flooded. ☠️☠️☠️☠️☠️☠️☠️`,
-			noop: () => 'Sea levels rose, no occupied coastal regions affected this time.',
+			name: 'Sea level rise',
+			tone: 'info',
+			message: (lost) => `Flooding wiped out ${lost} coastal region${lost === 1 ? '' : 's'}.`,
+			noop: () => 'No regions lost.',
 			filter: (c) => c === 'Tropical' || c === 'Mediterranean',
 			resist: () => gameState.intelligence / 4
 		}
 	];
 
 	// ─── Trait Trees ───────────────────────────────────────────────────────────
+	// `fx` lists exactly what a trait changes: numbers are added, booleans are set.
 	const traitTrees = {
 		type1: [
 			{
@@ -149,10 +176,8 @@
 				name: 'Proto-Brain',
 				cost: 10,
 				requires: [],
-				effect: () => {
-					gameState.intelligence += 1;
-				},
-				desc: 'Enlarged brain regions improve problem-solving and memory. K-selected species invest heavily in offspring brain development, a hallmark of the Type I survivorship curve, where few offspring are born but each has a high survival probability.'
+				fx: { intelligence: 1 },
+				desc: 'Larger brain regions improve memory and problem-solving. K-selected species make this kind of investment in each of their few offspring.'
 			},
 
 			{
@@ -160,11 +185,8 @@
 				name: 'Neural Complexity',
 				cost: 20,
 				requires: ['proto_brain'],
-				effect: () => {
-					gameState.intelligence += 2;
-					gameState.directedMigrationReady = true;
-				},
-				desc: 'Dense neural networks allow deliberate migration planning. Unlocks Directed Migration, a uniquely K-selected advantage. High-intelligence species (primates, elephants, orcas) can consciously select habitat, unlike r-selected organisms that scatter randomly.'
+				fx: { intelligence: 2, directedMigrationReady: true },
+				desc: 'Denser wiring lets your species plan where to go next. Primates and orcas pick their habitat. r-selected species scatter at random.'
 			},
 
 			{
@@ -172,12 +194,8 @@
 				name: 'Cultural Transmission',
 				cost: 35,
 				requires: ['neuro'],
-				effect: () => {
-					gameState.intelligence += 3;
-					gameState.dna += 10;
-					gameState.directedMigrationReady = true;
-				},
-				desc: 'Learned behaviors are passed between generations without genetic change, a form of non-genetic inheritance. This is the apex of K-selection: survival knowledge accumulates across generations, dramatically reducing early mortality.'
+				fx: { intelligence: 3, dna: 10, directedMigrationReady: true },
+				desc: 'Parents teach their young what they learned, with no change to DNA. Survival knowledge piles up over generations and fewer young die early.'
 			},
 
 			{
@@ -185,10 +203,8 @@
 				name: 'Parental Care',
 				cost: 15,
 				requires: [],
-				effect: () => {
-					gameState.coldResistance += 1;
-				},
-				desc: 'Parents invest energy protecting offspring through vulnerable early life stages. This is the defining feature of Type I survivorship curves; mortality is concentrated late in life rather than early.'
+				fx: { coldResistance: 1 },
+				desc: 'Parents guard their young through the riskiest early years. That is what gives a Type I curve its shape: most deaths come late in life.'
 			},
 
 			{
@@ -196,10 +212,8 @@
 				name: 'Thick Fur & Blubber',
 				cost: 20,
 				requires: ['care'],
-				effect: () => {
-					gameState.coldResistance += 1;
-				},
-				desc: 'Insulating coat and subcutaneous fat retain body heat. Allows colonization of Subarctic regions. Endothermy is energetically expensive — a K-selected trade-off of high energy use for reliable survival across temperature extremes.'
+				fx: { coldResistance: 1 },
+				desc: 'Insulation holds in body heat and opens up subarctic regions. Staying warm burns a lot of energy, a cost K-selected species pay for reliable survival.'
 			},
 
 			{
@@ -207,11 +221,8 @@
 				name: 'Antifreeze Proteins',
 				cost: 30,
 				requires: ['fur'],
-				effect: () => {
-					gameState.coldResistance += 1;
-					gameState.mutationRate += 0.3;
-				},
-				desc: 'Ice-binding proteins prevent cellular ice crystal formation — a specific molecular adaptation to tundra environments. Evolved independently in Arctic fish, insects, and plants (convergent evolution). Unlocks deep tundra territories.'
+				fx: { coldResistance: 1, mutationRate: 0.3 },
+				desc: 'Proteins that bind to ice crystals stop cells from freezing solid. Arctic fish and insects evolved them separately, a textbook case of convergent evolution.'
 			},
 
 			{
@@ -219,11 +230,8 @@
 				name: 'Primitive Tool Use',
 				cost: 25,
 				requires: ['proto_brain'],
-				effect: () => {
-					gameState.intelligence += 1;
-					gameState.mutationRate += 0.4;
-				},
-				desc: 'Using objects to solve problems extends the effective ecological niche of a species. K-selected species like chimpanzees and crows use tools to exploit food sources unavailable to competitors.'
+				fx: { intelligence: 1, mutationRate: 0.4 },
+				desc: 'Using objects to get food widens the niche. Chimpanzees and crows reach food their competitors can’t.'
 			},
 
 			{
@@ -231,10 +239,8 @@
 				name: 'Food Caching',
 				cost: 15,
 				requires: [],
-				effect: () => {
-					gameState.dna += 0.005;
-				},
-				desc: 'Storing food resources buffers against seasonal scarcity. Species with reliable energy reserves can invest more in offspring quality (K-strategy) rather than producing large numbers of low-investment young.'
+				fx: { dna: 0.005 },
+				desc: 'Stored food carries your species through lean seasons. With reliable energy, parents can invest more in each offspring.'
 			}
 		],
 		type2: [
@@ -243,22 +249,17 @@
 				name: 'Generalist Diet',
 				cost: 15,
 				requires: [],
-				effect: () => {
-					gameState.mutationRate += 0.5;
-				},
-				desc: 'Consuming a wide variety of food types reduces dependence on any single resource. Type II survivorship species experience roughly constant mortality rates across their lifespan, making adaptability super valuable.'
+				fx: { mutationRate: 0.5 },
+				desc: 'Eating many kinds of food means no single shortage can starve your species. On a Type II curve death can come at any age, so flexibility pays.'
 			},
 
 			{
 				id: 'scavenger',
-				name: 'Opportunistic Scavenging',
+				name: 'Scavenging',
 				cost: 20,
 				requires: ['generalist'],
-				effect: () => {
-					gameState.mutationRate += 0.4;
-					gameState.heatResistance += 1;
-				},
-				desc: 'Exploiting the kills of other predators provides energy at low risk. Scavengers like hyenas and vultures thrive in harsh, hot environments. Unlocks Desert/Arid territories.'
+				fx: { mutationRate: 0.4, heatResistance: 1 },
+				desc: 'Eating what other predators kill is cheap, low-risk energy. Hyenas and vultures thrive in hot, dry country. Opens desert and arid regions.'
 			},
 
 			{
@@ -266,24 +267,17 @@
 				name: 'Aquatic Foraging',
 				cost: 25,
 				requires: ['generalist'],
-				effect: () => {
-					gameState.mutationRate += 0.6;
-					gameState.coldResistance += 1;
-					gameState.oceanSpread = true;
-				},
-				desc: 'Exploiting rivers, lakes, and coastlines for food. Coastal foraging allows ocean island hopping, unlocking Ocean Spread. Cold water tolerance develops from immersion in cold seas.'
+				fx: { mutationRate: 0.6, coldResistance: 1, oceanSpread: true },
+				desc: 'Your species learns to feed along coasts and rivers. Coastal populations can hop between islands, so you can now spread across the ocean.'
 			},
 
 			{
 				id: 'homeo',
-				name: 'Endothermic Homeostasis',
+				name: 'Homeostasis',
 				cost: 25,
 				requires: [],
-				effect: () => {
-					gameState.coldResistance += 1;
-					gameState.heatResistance += 1;
-				},
-				desc: 'Maintaining a constant internal body temperature regardless of external conditions. This is a key reason mammals and birds achieve the relatively flat Type II survivorship curve.'
+				fx: { coldResistance: 1, heatResistance: 1 },
+				desc: 'Your species holds a steady body temperature whatever the weather. It’s a big reason mammals and birds have a flat Type II curve.'
 			},
 
 			{
@@ -291,10 +285,8 @@
 				name: 'Evaporative Cooling',
 				cost: 20,
 				requires: ['homeo'],
-				effect: () => {
-					gameState.heatResistance += 1;
-				},
-				desc: 'Sweat glands dissipate excess heat through water evaporation. Unlocks Desert and Arid regions. Humans are uniquely proficient sweaters among primates.'
+				fx: { heatResistance: 1 },
+				desc: 'Sweat carries heat away as it evaporates. Opens desert and arid regions. Humans out-sweat every other primate.'
 			},
 
 			{
@@ -302,23 +294,17 @@
 				name: 'Seasonal Torpor',
 				cost: 20,
 				requires: ['homeo'],
-				effect: () => {
-					gameState.coldResistance += 1;
-					gameState.dna += 5;
-				},
-				desc: 'Dramatically reducing metabolism during winter (hibernation) or heat (estivation) conserves energy when resources are scarce. It effectively compresses the survivorship curve.'
+				fx: { coldResistance: 1, dna: 5 },
+				desc: 'Metabolism drops sharply through winter or drought, saving energy when food runs out. Hibernation is the best-known version.'
 			},
 
 			{
 				id: 'social',
-				name: 'Social Group Living',
+				name: 'Social Groups',
 				cost: 20,
 				requires: [],
-				effect: () => {
-					gameState.intelligence += 1;
-					gameState.mutationRate += 0.3;
-				},
-				desc: 'Forming stable social groups enables cooperative foraging, predator defense, and information sharing. Group living is strongly associated with Type II survivorship.'
+				fx: { intelligence: 1, mutationRate: 0.3 },
+				desc: 'Stable groups forage together and keep watch for predators. Group living goes hand in hand with a Type II curve.'
 			},
 
 			{
@@ -326,22 +312,17 @@
 				name: 'Seasonal Migration',
 				cost: 30,
 				requires: ['social'],
-				effect: () => {
-					gameState.intelligence += 1;
-					gameState.directedMigrationReady = true;
-				},
-				desc: 'Innate navigation allows coordinated movement to follow seasonal resources. Unlocks Directed Migration. Unlike random dispersal, migration is directed and predictable.'
+				fx: { intelligence: 1, directedMigrationReady: true },
+				desc: 'Built-in navigation lets groups follow food as the seasons turn. Movement is planned, not random.'
 			},
 
 			{
 				id: 'camouflage',
-				name: 'Adaptive Camouflage',
+				name: 'Camouflage',
 				cost: 15,
 				requires: [],
-				effect: () => {
-					gameState.mutationRate += 0.7;
-				},
-				desc: 'Cryptic coloration and pattern matching to local environments reduces predation risk, temporarily pushing its local survivorship curve toward Type I.'
+				fx: { mutationRate: 0.7 },
+				desc: 'Coloring that matches the surroundings makes your species harder to find. Locally, that pushes survivorship toward Type I.'
 			}
 		],
 		type3: [
@@ -350,10 +331,8 @@
 				name: 'Mass Spawning',
 				cost: 10,
 				requires: [],
-				effect: () => {
-					gameState.mutationRate += 2.0;
-				},
-				desc: 'Producing vast numbers of offspring with minimal parental investment defines Type III survivorship: mortality is catastrophically high early in life, but sheer numbers ensure some individuals survive. Explosive spread rate.'
+				fx: { mutationRate: 2.0 },
+				desc: 'Each parent releases huge numbers of young and leaves them to fend for themselves. Nearly all die early, but enough survive to keep spreading.'
 			},
 
 			{
@@ -361,23 +340,17 @@
 				name: 'Airborne Dispersal',
 				cost: 20,
 				requires: ['spores'],
-				effect: () => {
-					gameState.mutationRate += 1.5;
-				},
-				desc: 'Lightweight eggs, larvae, or seeds carried by wind currents can travel thousands of kilometers. Individual survival probability is near zero, but reach is global. Massively increases spread rate.'
+				fx: { mutationRate: 1.5 },
+				desc: 'Light eggs and seeds ride the wind for thousands of kilometers. Few survive the trip, but the reach is global.'
 			},
 
 			{
 				id: 'ocean_current',
-				name: 'Ocean Current Dispersal',
+				name: 'Ocean Drift',
 				cost: 20,
 				requires: ['spores'],
-				effect: () => {
-					gameState.mutationRate += 1.0;
-					gameState.coldResistance += 1;
-					gameState.oceanSpread = true;
-				},
-				desc: 'Buoyant eggs or larvae carried by ocean currents colonize distant coastlines and islands. Unlocks Ocean Spread across water barriers. Cold oceanic waters provide incidental cold resistance.'
+				fx: { mutationRate: 1.0, coldResistance: 1, oceanSpread: true },
+				desc: 'Floating larvae drift on ocean currents to distant coasts, so you can now spread across the ocean. Cold seawater toughens them up.'
 			},
 
 			{
@@ -385,86 +358,85 @@
 				name: 'Hypermutation',
 				cost: 15,
 				requires: [],
-				effect: () => {
-					gameState.dna += 0.005;
-				},
-				desc: 'Elevated mutation rates generate enormous genetic variation each generation. Most mutations are harmful, but rare beneficial mutations spread rapidly through a large population. Increases passive DNA generation.'
+				fx: { dna: 0.005 },
+				desc: 'A high mutation rate throws up lots of variation every generation. Most mutations hurt. The rare useful one spreads fast through a big population.'
 			},
 
 			{
 				id: 'horizontal_gene',
-				name: 'Horizontal Gene Transfer',
+				name: 'Gene Swapping',
 				cost: 25,
 				requires: ['unstable'],
-				effect: () => {
-					gameState.heatResistance += 1;
-					gameState.coldResistance += 1;
-				},
-				desc: 'Incorporating genetic material from other organisms. Common in bacteria, also observed in some invertebrates and plants. Allows extremely rapid acquisition of locally-adapted traits like heat shock proteins or antifreeze compounds.'
+				fx: { heatResistance: 1, coldResistance: 1 },
+				desc: 'Your species picks up genes straight from other organisms, the way bacteria do. Ready-made adaptations like heat-shock proteins arrive in one step.'
 			},
 
 			{
 				id: 'metamorphosis',
-				name: 'Radical Life Stage Shift',
+				name: 'Metamorphosis',
 				cost: 30,
 				requires: ['unstable'],
-				effect: () => {
-					gameState.mutationRate += 1.0;
-					gameState.heatResistance += 1;
-				},
-				desc: 'Complete metamorphosis allows larval and adult stages to exploit entirely different ecological niches. Insects using this strategy account for the majority of all animal species on Earth.'
+				fx: { mutationRate: 1.0, heatResistance: 1 },
+				desc: 'Larvae and adults live completely different lives and never compete for food. Most animal species on Earth are insects that do this.'
 			},
 
 			{
 				id: 'swarm_basic',
-				name: 'Swarm Behavior',
+				name: 'Swarming',
 				cost: 15,
 				requires: [],
-				effect: () => {
-					gameState.intelligence += 1;
-					gameState.mutationRate += 0.5;
-				},
-				desc: 'Simple collective behavior from individual organisms following local rules creates predator confusion, improves foraging, and accelerates colonization without requiring individual intelligence.'
+				fx: { intelligence: 1, mutationRate: 0.5 },
+				desc: 'Each individual follows a few simple rules and the group moves as one. Swarms confuse predators and find food faster.'
 			},
 
 			{
 				id: 'swarm_adv',
-				name: 'Emergent Collective Intelligence',
+				name: 'Colony Intelligence',
 				cost: 35,
 				requires: ['swarm_basic'],
-				effect: () => {
-					gameState.intelligence += 2;
-					gameState.directedMigrationReady = true;
-				},
-				desc: 'Complex colony-level problem solving (as seen in army ants, termites, and slime molds) allows the collective to navigate and colonize new territories strategically. Unlocks Directed Migration.'
+				fx: { intelligence: 2, directedMigrationReady: true },
+				desc: 'Army ants and slime molds solve problems as a colony that no single individual could. The colony can now choose where to go.'
 			},
 
 			{
 				id: 'chitin_armor',
-				name: 'Desiccation-Resistant Exoskeleton',
+				name: 'Exoskeleton',
 				cost: 20,
 				requires: [],
-				effect: () => {
-					gameState.heatResistance += 1;
-				},
-				desc: 'A watertight chitinous exoskeleton prevents dehydration in dry, hot environments, the adaptation that allowed early arthropods to colonize land. Unlocks Desert/Arid biomes.'
+				fx: { heatResistance: 1 },
+				desc: 'A waterproof shell keeps the body from drying out. It’s how early arthropods made it onto land. Opens desert and arid regions.'
 			}
 		]
 	};
 
+	const fxLabels = {
+		intelligence: 'Intelligence',
+		mutationRate: 'Spread rate',
+		coldResistance: 'Cold resistance',
+		heatResistance: 'Heat resistance',
+		dna: 'DNA',
+		directedMigrationReady: 'Directed migration',
+		oceanSpread: 'Ocean spread'
+	};
+
 	// ─── Lifecycle ─────────────────────────────────────────────────────────────
 	onMount(() => {
-		const { width, height } = mapContainer.getBoundingClientRect();
-
-		projection = d3.geoNaturalEarth1();
+		projection = d3.geoEquirectangular();
 		path = d3.geoPath().projection(projection);
-		svg = d3.select(mapContainer.querySelector('svg')).attr('width', width).attr('height', height);
-		svg.append('rect').attr('width', width).attr('height', height).attr('class', 'ocean').on('click', deselectAll);
+		svg = d3.select(svgEl).on('click', deselectAll);
+
+		earthImage = svg
+			.append('image')
+			.attr('href', EARTH_IMAGE_URL)
+			.attr('preserveAspectRatio', 'none')
+			.attr('class', 'earth')
+			.on('load', () => earthImage.classed('loaded', true))
+			.on('error', () => svg.classed('no-imagery', true));
+
 		g = svg.append('g');
 
 		d3.json('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json').then((data) => {
 			countriesData = topojson.feature(data, data.objects.countries);
-			projection.fitSize([width, height], countriesData);
 
 			const idToName = new Map();
 
@@ -501,24 +473,42 @@
 				landNeighbors.get(b)?.delete(a);
 			}
 
-			g.selectAll('path').data(countriesData.features).enter().append('path').attr('class', 'country').attr('d', path).attr('fill', (d) => getCountryColor(d)).on('click', (event, d) => handleCountryClick(event, d));
+			g.selectAll('path').data(countriesData.features).enter().append('path').attr('class', 'country').on('click', (event, d) => handleCountryClick(event, d));
+
+			layoutMap();
+			updateVisuals();
 		});
 
-		window.addEventListener('resize', onResize);
+		// Size from the container itself. Measuring once on mount gave 0×0
+		// before styles applied, which left the map blank until a resize.
+		const ro = new ResizeObserver(layoutMap);
 
-		return () => window.removeEventListener('resize', onResize);
+		ro.observe(mapContainer);
+		layoutMap();
+
+		return () => ro.disconnect();
 	});
 
 	// ─── Map helpers ───────────────────────────────────────────────────────────
-	function onResize() {
-		if (!countriesData) return;
+	function layoutMap() {
+		if (!svg || !mapContainer) return;
 
 		const { width: w, height: h } = mapContainer.getBoundingClientRect();
 
-		projection.fitSize([w, h], countriesData);
+		if (!w || !h) return;
+
+		const latSpan = (LAT_TOP - LAT_BOTTOM) * Math.PI / 180;
+		const scale = Math.min(w / (2 * Math.PI), h / latSpan);
+
+		projection.scale(scale).center([0, (LAT_TOP + LAT_BOTTOM) / 2]).translate([w / 2, h / 2]);
 		svg.attr('width', w).attr('height', h);
-		svg.select('rect').attr('width', w).attr('height', h);
-		g.selectAll('.country').attr('d', path);
+
+		const [x0, y0] = projection([-180, 90]);
+		const [x1, y1] = projection([180, -90]);
+
+		earthImage.attr('x', x0).attr('y', y0).attr('width', x1 - x0).attr('height', y1 - y0);
+
+		if (countriesData) g.selectAll('.country').attr('d', path);
 	}
 
 	function getClimate(d) {
@@ -531,18 +521,12 @@
 		return { climate: 'Temperate', temp: 15 };
 	}
 
-	function getCountryColor(d) {
-		const climate = problemCountries[d.properties.name] || getClimate(d).climate;
-
-		return climateColors[climate] || '#52b788';
-	}
-
 	function PredLevel(d) {
 		if (!gameState.originCountry) return 'Unknown';
 
 		const dist = d3.geoDistance(d3.geoCentroid(gameState.originCountry), d3.geoCentroid(d));
 
-		if (dist === 0) return 'Low (Native)';
+		if (dist === 0) return 'Low (native)';
 		if (dist < 0.7) return 'Low';
 		if (dist < 1.5) return 'Medium';
 		if (dist < 2.3) return 'High';
@@ -551,9 +535,12 @@
 	}
 
 	function updateVisuals() {
+		gameState.regions = occupiedCountries.size;
+
 		if (!g) return;
 
 		g.selectAll('.country').classed('occupied', (d) => occupiedCountries.has(d.properties.name)).classed('selected-highlight', (d) => gameState.selectedCountry === d.properties.name);
+		g.selectAll('.selected-highlight').raise();
 	}
 
 	// ─── Game flow ─────────────────────────────────────────────────────────────
@@ -612,6 +599,7 @@
 		occupyCountry(d.properties.name);
 		gameState.selectedCountry = d.properties.name;
 		updateSidePanelData(d);
+		updateVisuals();
 		setInterval(updateGame, 50);
 	}
 
@@ -619,11 +607,11 @@
 		gameState.selectedCountry = null;
 
 		sidePanel = {
-			title: 'Select a Region',
+			title: null,
 			climate: '-',
 			temp: '-',
 			pred: '-',
-			status: '-'
+			occupied: false
 		};
 
 		updateVisuals();
@@ -632,15 +620,22 @@
 	function updateSidePanelData(d) {
 		const climate = getClimate(d);
 		const predation = PredLevel(d);
-		const isOccupied = occupiedCountries.has(d.properties.name);
 
 		sidePanel = {
 			title: d.properties.name,
 			climate: problemCountries[d.properties.name] || climate.climate,
-			temp: `${climate.temp}°C`,
+			temp: `${climate.temp} °C`,
 			pred: predation,
-			status: isOccupied ? 'Occupied' : 'Unoccupied'
+			occupied: occupiedCountries.has(d.properties.name)
 		};
+	}
+
+	function refreshSidePanel() {
+		if (!gameState.selectedCountry || !countriesData) return;
+
+		const feat = countriesData.features.find((f) => f.properties.name === gameState.selectedCountry);
+
+		if (feat) updateSidePanelData(feat);
 	}
 
 	// ─── Game loop ─────────────────────────────────────────────────────────────
@@ -665,8 +660,10 @@
 			gameState.peakTerritories = occupiedCountries.size;
 		}
 
-		addLog(`Colonized ${name}`, 'var(--accent)');
+		addLog(`Spread to ${name}`, 'spread');
 		updateVisuals();
+
+		if (name === gameState.selectedCountry) refreshSidePanel();
 	}
 
 	function checkMigration() {
@@ -746,7 +743,7 @@
 		if (!name || !gameState.directedMigrationReady) return;
 
 		if (gameState.dna < 20) {
-			showEventBanner('Not enough DNA points for Directed Migration.', '#ff9900');
+			showEventBanner('Not enough DNA. Migrating costs 20.', 'warn');
 
 			return;
 		}
@@ -756,7 +753,7 @@
 		if (!target) return;
 
 		if (occupiedCountries.has(name)) {
-			showEventBanner('Already occupied!', '#aaa');
+			showEventBanner('You already live there.', 'warn');
 
 			return;
 		}
@@ -764,7 +761,7 @@
 		const reachable = isReachable(name);
 
 		if (!reachable && gameState.intelligence < 3) {
-			showEventBanner('Ocean barrier! Need Ocean Spread trait or max Intelligence.', '#0077cc');
+			showEventBanner('Too far across open water. Evolve ocean spread or reach intelligence 3.', 'info');
 
 			return;
 		}
@@ -773,13 +770,13 @@
 			const climate = problemCountries[name] || getClimate(target).climate;
 
 			if (climate === 'Tundra' || climate === 'Subarctic' && gameState.coldResistance < 1) {
-				showEventBanner('Too cold! Evolve Cold Resistance first.', '#88ccff');
+				showEventBanner('Too cold. Evolve cold resistance first.', 'info');
 
 				return;
 			}
 
 			if (climate === 'Desert' || climate === 'Arid' && gameState.heatResistance < 1) {
-				showEventBanner('Too hot! Evolve Heat Resistance first.', '#ffaa44');
+				showEventBanner('Too hot. Evolve heat resistance first.', 'warn');
 
 				return;
 			}
@@ -787,7 +784,7 @@
 
 		gameState.dna -= 20;
 		occupyCountry(name);
-		showEventBanner(`Directed Migration: Your species settled ${name}!`, '#00ffcc');
+		showEventBanner(`Your species settled ${name}.`, 'good', 'Migration');
 	}
 
 	// ─── Win/Lose ──────────────────────────────────────────────────────────────
@@ -802,23 +799,22 @@
 	function endGame(won) {
 		gameState.running = false;
 
-		const name = gameState.speciesName || 'Your Species';
+		const name = gameState.speciesName || 'Your species';
+		const traitCount = gameState.traits.length;
 
-		if (won) {
-			endgameData = {
-				won: true,
-				title: '🌍 GLOBAL DOMINATION',
-				stats: `<strong>${name}</strong> has colonized every region on Earth.<br>Strategy: ${strategyLabels[gameState.strategy]} &nbsp;|&nbsp; Years elapsed: ${Math.floor(gameState.years).toLocaleString()} &nbsp;|&nbsp; Traits evolved: ${gameState.traits.length}`,
-				msg: `Your species achieved what no organism has done before: complete global colonization.<br>With ${gameState.traits.length} evolutionary adaptation${gameState.traits.length !== 1 ? 's' : ''} and a ${strategyLabels[gameState.strategy]} strategy, <em>${name}</em> outcompeted every ecosystem on the planet.`
-			};
-		} else {
-			endgameData = {
-				won: false,
-				title: '💀 EXTINCTION',
-				stats: `<strong>${name}</strong> has gone extinct.<br>Strategy: ${strategyLabels[gameState.strategy]} &nbsp;|&nbsp; Years elapsed: ${Math.floor(gameState.years).toLocaleString()} &nbsp;|&nbsp; Peak territories: ${gameState.peakTerritories || 1}`,
-				msg: `All populations of <em>${name}</em> have been wiped out by environmental events.<br><br>Over 99% of all species that have ever lived are now extinct. Species that invest too heavily in specialization are most vulnerable when conditions change. Consider evolving climate resistance traits earlier.`
-			};
-		}
+		endgameData = {
+			won,
+			title: won ? 'Worldwide' : 'Extinct',
+			lead: won ? `${name} lives in every region on Earth.` : `The last population of ${name} is gone.`,
+			body: won
+				? `It took ${traitCount} adaptation${traitCount === 1 ? '' : 's'} and a ${strategyLabels[gameState.strategy]} strategy.`
+				: 'More than 99% of all species that ever lived are extinct. Climate resistance, evolved early, would have bought more time.',
+			stats: [
+				['Strategy', strategyLabels[gameState.strategy]],
+				['Years', Math.floor(gameState.years).toLocaleString()],
+				won ? ['Traits', String(traitCount)] : ['Peak regions', String(gameState.peakTerritories || 1)]
+			]
+		};
 
 		showEndgame = true;
 	}
@@ -842,8 +838,8 @@
 		if (affected.length === 0) {
 			const msg = evt.noop();
 
-			showEventBanner(msg, evt.color);
-			addLog(`${evt.name}: ${msg}`, evt.color);
+			showEventBanner(msg, evt.tone, evt.name);
+			addLog(`${evt.name}. ${msg}`, 'event');
 
 			return;
 		}
@@ -859,24 +855,24 @@
 		}
 
 		updateVisuals();
+		refreshSidePanel();
 
 		if (lostNames.length === 0) {
 			const msg = evt.noop();
 
-			showEventBanner(msg, evt.color);
-			addLog(`${evt.name}: ${msg}`, evt.color);
+			showEventBanner(msg, evt.tone, evt.name);
+			addLog(`${evt.name}. ${msg}`, 'event');
 		} else {
-			const summary = evt.message(lostNames.length);
-
-			showEventBanner(summary, evt.color);
-			addLog(`${evt.name}: Lost ${lostNames.join(', ')}`, evt.color);
+			showEventBanner(evt.message(lostNames.length), evt.tone, evt.name);
+			addLog(`${evt.name}. Lost ${lostNames.join(', ')}.`, 'event');
 		}
 	}
 
-	function showEventBanner(msg, color = '#ff4d4d') {
-		eventBanner = { visible: true, msg, color };
+	function showEventBanner(msg, tone = 'danger', title = '') {
+		eventBanner = { visible: true, title, msg, tone };
+		clearTimeout(bannerTimer);
 
-		setTimeout(
+		bannerTimer = setTimeout(
 			() => {
 				eventBanner = { ...eventBanner, visible: false };
 			},
@@ -884,16 +880,42 @@
 		);
 	}
 
-	function addLog(msg, color) {
-		logEntries = [
-			{ msg: `Yr ${Math.floor(gameState.years)}: ${msg}`, color },
-			...logEntries.slice(0, 49)
-		];
+	function addLog(msg, kind) {
+		logEntries = [{ year: Math.floor(gameState.years), msg, kind }, ...logEntries.slice(0, 49)];
 	}
 
 	// ─── Evolution tree ────────────────────────────────────────────────────────
+	let availableTraits = $derived(traitTrees[gameState.strategy] || []);
+	let rootTraits = $derived(availableTraits.filter((t) => t.requires.length === 0));
+	let selectedTrait = $derived(availableTraits.find((t) => t.id === selectedTraitId) || null);
+
+	function childrenOf(id) {
+		return availableTraits.filter((t) => t.requires[0] === id);
+	}
+
+	function traitName(id) {
+		return availableTraits.find((t) => t.id === id)?.name ?? id;
+	}
+
+	function traitStatus(t) {
+		if (gameState.traits.includes(t.id)) return 'owned';
+		if (!t.requires.every((r) => gameState.traits.includes(r))) return 'locked';
+		if (gameState.dna < t.cost) return 'expensive';
+
+		return 'available';
+	}
+
+	function fxRows(t) {
+		return Object.entries(t.fx).map(([k, v]) => [fxLabels[k], typeof v === 'boolean' ? 'Unlocked' : `+${v}`]);
+	}
+
 	function openEvolve() {
 		gameState.running = false;
+
+		if (!selectedTrait) {
+			selectedTraitId = (availableTraits.find((t) => traitStatus(t) === 'available') || availableTraits[0])?.id ?? null;
+		}
+
 		showEvolution = true;
 	}
 
@@ -905,18 +927,17 @@
 	function buyTrait(traitId, cost) {
 		if (gameState.dna < cost) return;
 
+		const trait = availableTraits.find((t) => t.id === traitId);
+
+		if (!trait || traitStatus(trait) !== 'available') return;
+
 		gameState.dna -= cost;
 		gameState.traits = [...gameState.traits, traitId];
 
-		const trait = traitTrees[gameState.strategy]?.find((t) => t.id === traitId);
-
-		if (trait) trait.effect();
-
-		// trigger reactivity
-		gameState = { ...gameState };
+		for (const [key, value] of Object.entries(trait.fx)) {
+			if (typeof value === 'boolean') gameState[key] = value; else gameState[key] += value;
+		}
 	}
-
-	let availableTraits = $derived(traitTrees[gameState.strategy] || []);
 
 	// ─── Quiz ──────────────────────────────────────────────────────────────────
 	function openQuiz() {
@@ -931,8 +952,9 @@
 
 	function loadQuestion(index) {
 		answeredCurrent = false;
+		selectedAnswer = null;
 		quizShowNext = false;
-		quizFeedback = { msg: '', color: '' };
+		quizFeedback = { correct: null, msg: '' };
 
 		if (index >= apBioQuestions.length) {
 			index = 0;
@@ -947,21 +969,15 @@
 		if (answeredCurrent) return;
 
 		answeredCurrent = true;
+		selectedAnswer = selectedIndex;
 
 		const qData = apBioQuestions[currentQuestionIndex];
 
 		if (selectedIndex === qData.answer) {
-			quizFeedback = {
-				msg: `CORRECT! +3 DNA harvested.\n\n${qData.explanation}`,
-				color: 'var(--accent)'
-			};
-
+			quizFeedback = { correct: true, msg: qData.explanation };
 			gameState.dna += 3;
 		} else {
-			quizFeedback = {
-				msg: `INCORRECT. Option [${qData.answer + 1}] was the correct variant.\n\n${qData.explanation}`,
-				color: 'var(--danger)'
-			};
+			quizFeedback = { correct: false, msg: qData.explanation };
 		}
 
 		quizShowNext = true;
@@ -970,361 +986,303 @@
 	function loadNextQuestion() {
 		loadQuestion(Math.random() * apBioQuestions.length | 0);
 	}
+
+	const letters = ['A', 'B', 'C', 'D', 'E'];
 </script>
 
 <!-- ─── Name Screen ─────────────────────────────────────────────────────────── -->
 
 {#if screen === 'name'}
-	<div class="overlay z-[1100]">
-		<h1 class="mb-0 tracking-[6px]">EVOLUTION INC.</h1>
-		<p class="mt-2 text-[#aaa]">A plague-inc-like survivorship curve simulation</p>
+	<div class="hero z-[1100]" style="--earth:url({EARTH_IMAGE_URL})">
+		<div class="hero-inner">
+			<h1 class="display hero-title">Evolution<br />Inc.</h1>
 
-		<div class="ui-panel mt-[30px] px-[40px] py-[30px] text-center">
-			<h3 class="mt-0 text-cyan-400">Name Your Species</h3>
-			<p class="text-[0.9em] text-[#aaa]">What will future fossil hunters call you?</p>
+			<label class="hero-label" for="species-name">Name your species</label>
 
-			<input
-				class="input-field"
-				type="text"
-				maxlength="24"
-				placeholder="e.g. Homo Sapien"
-				bind:value={speciesInputVal}
-				onkeydown={(e) => e.key === 'Enter' && confirmName()}
-			/>
+			<div class="hero-row">
+				<input
+					id="species-name"
+					class="hero-input"
+					type="text"
+					maxlength="24"
+					placeholder="Homo sapiens"
+					bind:value={speciesInputVal}
+					onkeydown={(e) => e.key === 'Enter' && confirmName()}
+				/>
 
-			<button class="mt-[10px]" onclick={confirmName}>Confirm Name →</button>
+				<button class="btn accent" onclick={confirmName} disabled={!speciesInputVal.trim()}>Start</button>
+			</div>
 		</div>
 	</div>
 
 	<!-- ─── Strategy Screen ────────────────────────────────────────────────────── -->
 {:else if screen === 'strategy'}
-	<div class="overlay z-[1000]">
-		<h1 class="tracking-[5px]">CHOOSE YOUR SURVIVAL STRATEGY</h1>
+	<div class="strategy z-[1000]">
+		<div class="strategy-inner">
+			<p class="strategy-kicker"><em>{gameState.speciesName}</em></p>
+			<h1 class="display strategy-title">Pick a survivorship curve</h1>
 
-		<p class="mt-1 mb-6 text-[1.1em] text-cyan-400">{gameState.speciesName}: Select your survivorship curve</p>
+			<div class="strategy-grid">
+				{#each strategies as opt}
+					<button class="strategy-card" onclick={() => startGame(opt.key)}>
+						<svg class="curve" viewBox="0 0 172 102" preserveAspectRatio="xMinYMid meet" aria-hidden="true">
+							<text transform="translate(7,46) rotate(-90)" text-anchor="middle">survivors</text>
+							<text x="170" y="100" text-anchor="end">age</text>
+							<g transform="translate(12,0)">
+								<line x1="4" y1="4" x2="4" y2="88" />
+								<line x1="4" y1="88" x2="158" y2="88" />
+								<path d={opt.curve} />
+							</g>
+						</svg>
 
-		<div class="mt-[10px] flex gap-5">
-			{#each [
-				{
-					key: 'type1',
-					label: 'Type I (K-Selection)',
-					desc: 'Low mortality throughout life, most individuals survive to old age. Few, high-investment offspring. Ex: humans, elephants, large mammals.',
-					starts: 'High Intelligence, unlocks brain-based traits first.'
-				},
-
-				{
-					key: 'type2',
-					label: 'Type II (Constant Mortality)',
-					desc: 'Mortality rate is roughly equal at all life stages, lanced reproduction. Ex: birds, rodents, many reptiles.',
-					starts: 'Balanced spread & intelligence, most adaptable tree.'
-				},
-
-				{
-					key: 'type3',
-					label: 'Type III (r-Selection)',
-					desc: 'Catastrophically high early mortality, only a tiny fraction survive to reproduce. Vast numbers of offspring. Ex: fish, insects, most invertebrates.',
-					starts: 'Rapid spread, quantity over quality.'
-				}
-			] as opt}
-				<div class="ui-panel w-[260px] text-center">
-					<h3 class="text-cyan-400">{opt.label}</h3>
-					<p class="text-[0.85em] text-[#aaa]">{opt.desc}</p>
-					<p class="mt-2 text-[0.8em]"><strong>Starts with:</strong>{opt.starts}</p>
-
-					<button class="mt-3" onclick={() => startGame(opt.key)}>Choose {opt.label.split(' ')[0]} {opt.label.split(' ')[1]}</button>
-				</div>
-			{/each}
+						<span class="display strategy-name">{opt.name}</span>
+						<span class="strategy-sub">{opt.sub}</span>
+						<span class="strategy-desc">{opt.desc}</span>
+						<span class="strategy-starts">{opt.starts}</span>
+						<span class="strategy-cta">Play {opt.name} →</span>
+					</button>
+				{/each}
+			</div>
 		</div>
 	</div>
 {/if}
 
 <!-- ─── Game UI (always mounted so D3 can attach) ─────────────────────────── -->
 
-<div id="top-bar" class="ui-panel flex h-[60px] w-full items-center justify-between border-b-2 border-cyan-400/80 px-10">
-	<div class="text-[0.95rem] uppercase tracking-[2px] text-[#e0e0e0]">
-		SPECIES:
-		<span class="stat-value">{gameState.speciesName.toUpperCase()}</span>
-	</div>
+<header class="topbar">
+	<div class="display wordmark">Evolution Inc.</div>
 
-	<div class="text-[0.95rem] uppercase tracking-[2px] text-[#e0e0e0]">
-		DNA:
-		<span class="stat-value">{Math.floor(gameState.dna)}</span>
-	</div>
+	<div class="species">
+		<em>{gameState.speciesName}</em>
 
-	<div class="text-[0.95rem] uppercase tracking-[2px] text-[#e0e0e0]">
-		YEAR:
-		<span class="stat-value">{Math.floor(gameState.years)}</span>
-	</div>
-
-	<div class="text-[0.95rem] uppercase tracking-[2px] text-[#e0e0e0]">
-		COLD:
-		<span class="stat-value">{gameState.coldResistance}</span>
-	</div>
-
-	<div class="text-[0.95rem] uppercase tracking-[2px] text-[#e0e0e0]">
-		HEAT:
-		<span class="stat-value">{gameState.heatResistance}</span>
-	</div>
-
-	<div class="text-[0.95rem] uppercase tracking-[2px] text-[#e0e0e0]">
-		INT:
-		<span class="stat-value">{gameState.intelligence}</span>
-	</div>
-</div>
-
-<div id="map-container" class="relative flex-1 overflow-hidden cursor-crosshair" bind:this={mapContainer}>
-	<svg id="world-map"></svg>
-
-	{#if screen === 'game' && !gameState.originSet}
-		<div class="absolute left-1/2 top-5 z-[5] -translate-x-1/2 rounded-full bg-cyan-400 px-4 py-1 font-bold text-black">CLICK A REGION TO START YOUR SPECIES</div>
-	{/if}
-</div>
-
-<div id="bottom-bar" class="flex h-[200px] w-full border-t-2 border-cyan-400/80 pb-[30px]">
-	<div id="side-panel" class="ui-panel flex h-full flex-[3_1_0%] flex-wrap items-center justify-between gap-[15px] border-t-0">
-		<h2 class="m-0 flex-[1_1_100%] text-cyan-400">{sidePanel.title}</h2>
-		<p class="m-0 flex-[1_1_150px] text-[0.9em]">Climate: <span>{sidePanel.climate}</span></p>
-		<p class="m-0 flex-[1_1_150px] text-[0.9em]">Temperature: <span>{sidePanel.temp}</span></p>
-		<p class="m-0 flex-[1_1_150px] text-[0.9em]">Predation: <span>{sidePanel.pred}</span></p>
-		<p class="m-0 flex-[1_1_150px] text-[0.9em]">Status: <span>{sidePanel.status}</span></p>
-		<button class="w-full" onclick={openEvolve}>Open Evolution Tree</button>
-
-		{#if gameState.directedMigrationReady}
-			<button class="mt-[6px] w-full" onclick={directedMigrate}>🧠 Directed Migration (20 DNA)</button>
+		{#if gameState.strategy}
+			<span class="tag">{strategies.find((s) => s.key === gameState.strategy)?.name}</span>
 		{/if}
 	</div>
 
-	<div id="log-container" class="flex-1 overflow-y-auto border-l border-white/10 bg-black/30 p-[10px] text-[0.8em]">
-		<strong class="text-cyan-400">EVENT LOG</strong>
+	<dl class="stats num">
+		<div class="stat dna"><dt>DNA</dt><dd>{Math.floor(gameState.dna)}</dd></div>
+		<div class="stat"><dt>Year</dt><dd>{Math.floor(gameState.years).toLocaleString()}</dd></div>
+		<div class="stat"><dt>Regions</dt><dd>{gameState.regions}</dd></div>
+		<div class="stat"><dt>Cold</dt><dd>{gameState.coldResistance}</dd></div>
+		<div class="stat"><dt>Heat</dt><dd>{gameState.heatResistance}</dd></div>
+		<div class="stat"><dt>Int</dt><dd>{gameState.intelligence}</dd></div>
+	</dl>
+</header>
 
-		{#each logEntries as entry}
-			<div
-				class="log-entry mb-[5px] border-l-2 pl-[5px] text-[#bbb]"
-				style="border-color:{entry.color}"
-			>{entry.msg}</div>
-		{/each}
-	</div>
+<div id="map-container" bind:this={mapContainer}>
+	<svg id="world-map" bind:this={svgEl}></svg>
+
+	{#if screen === 'game' && !gameState.originSet}
+		<div class="toast start-hint">Click a country to choose where your species starts.</div>
+	{/if}
+
+	{#if eventBanner.visible}
+		<div class="toast event tone-{eventBanner.tone}" role="status">
+			{#if eventBanner.title}<b>{eventBanner.title}</b>{/if}
+			<span>{eventBanner.msg}</span>
+		</div>
+	{/if}
+
+	{#if screen === 'game' && gameState.running && !showQuiz}
+		<button class="btn accent quiz-btn" onclick={openQuiz}>Bio quiz +3 DNA</button>
+	{/if}
+
+	<!-- ─── Quiz Popup ───────────────────────────────────────────────────────── -->
+
+	{#if showQuiz}
+		<div class="quiz" role="dialog" aria-label="Bio quiz">
+			<div class="quiz-head">
+				<span class="quiz-title">Bio quiz</span>
+				<button class="link-btn" onclick={closeQuiz}>Close</button>
+			</div>
+
+			<div class="quiz-body">
+				{#if quizQuestion}
+					<p class="quiz-q">{quizQuestion.question}</p>
+
+					<div class="quiz-options">
+						{#each quizQuestion.options as optText, i}
+							<button
+								class="quiz-option"
+								class:correct={answeredCurrent && i === quizQuestion.answer}
+								class:wrong={answeredCurrent && i === selectedAnswer && i !== quizQuestion.answer}
+								onclick={() => checkQuizAnswer(i)}
+								disabled={answeredCurrent}
+							>
+								<span class="letter">{letters[i]}</span>
+								<span>{optText}</span>
+							</button>
+						{/each}
+					</div>
+
+					{#if quizFeedback.correct !== null}
+						<div class="quiz-feedback" class:correct={quizFeedback.correct}>
+							<strong>{quizFeedback.correct ? 'Correct. +3 DNA.' : `Not quite. The answer is ${letters[quizQuestion.answer]}.`}</strong>
+							<p>{quizFeedback.msg}</p>
+						</div>
+					{/if}
+
+					{#if quizShowNext}
+						<button class="btn quiz-next" onclick={loadNextQuestion}>Next question</button>
+					{/if}
+				{:else}
+					<p>Loading question…</p>
+				{/if}
+			</div>
+		</div>
+	{/if}
 </div>
 
-{#if screen === 'game' && gameState.running}
-	<button id="summon-quiz-btn" class="fixed bottom-[250px] right-5 z-[1400] shadow-[0_0_10px_rgba(0,255,204,0.3)]" onclick={openQuiz}>Study Bio (Earn DNA)</button>
-{/if}
+<section class="bottom">
+	<div class="region">
+		{#if sidePanel.title}
+			<div class="region-head">
+				<h2 class="display region-name">{sidePanel.title}</h2>
 
-<!-- ─── Event Banner ───────────────────────────────────────────────────────── -->
+				{#if sidePanel.occupied}<span class="pill">Occupied</span>{/if}
+			</div>
 
-{#if eventBanner.visible}
-	<div
-		id="event-banner"
-		class="fixed inset-x-0 top-[80px] z-[999] mx-auto w-max rounded-full px-6 py-2 text-[1.1em] font-bold text-black"
-		style="background:{eventBanner.color}"
-	>{eventBanner.msg}</div>
-{/if}
+			<dl class="facts num">
+				<div><dt>Climate</dt><dd>{sidePanel.climate}</dd></div>
+				<div><dt>Temp</dt><dd>{sidePanel.temp}</dd></div>
+				<div><dt>Predation</dt><dd>{sidePanel.pred}</dd></div>
+			</dl>
+		{:else}
+			<h2 class="display region-name muted">No region selected</h2>
+			<p class="region-hint">Click a country on the map to see its climate and predation.</p>
+		{/if}
 
-<!-- ─── Quiz Popup ─────────────────────────────────────────────────────────── -->
+		<div class="actions">
+			<button class="btn" onclick={openEvolve} disabled={!gameState.strategy}>Evolve</button>
 
-{#if showQuiz}
-	<div id="quiz-popup" class="fixed bottom-[250px] right-5 z-[1500] flex max-h-[400px] w-[340px] flex-col rounded border-2 border-cyan-400/80 bg-[rgba(15,22,33,0.95)] shadow-[0_0_15px_rgba(0,255,204,0.2)]">
-		<div class="flex items-center justify-between border-b border-cyan-400/30 bg-cyan-400/10 px-[15px] py-[10px]">
-			<strong class="tracking-[1px] text-cyan-400">AP BIO WORKSTATION</strong>
-
-			<button
-				class="px-[8px] py-[2px] text-[0.8em] text-[#aaa]"
-				onclick={closeQuiz}
-			>X</button>
-		</div>
-
-		<div class="overflow-y-auto p-[15px] text-[0.85em] leading-[1.4]">
-			{#if quizQuestion}
-				<div class="mb-3 font-semibold text-white">{currentQuestionIndex + 1}. {quizQuestion.question}</div>
-
-				<div>
-					{#each quizQuestion.options as optText, i}
-						<button
-							class="quiz-option-btn mb-[6px] block w-full border border-white/10 bg-white/5 px-[12px] py-[8px] text-left text-[0.9em] text-[#e0e0e0] transition hover:border-cyan-400 hover:bg-cyan-400/10 hover:text-white"
-							onclick={() => checkQuizAnswer(i)}
-							disabled={answeredCurrent}
-						>{optText}</button>
-					{/each}
-				</div>
-
-				{#if quizFeedback.msg}
-					<div
-						class="mt-[10px] whitespace-pre-line text-[0.9em] font-bold"
-						style="color:{quizFeedback.color}"
-					>{quizFeedback.msg}</div>
-				{/if}
-
-				{#if quizShowNext}
-					<button class="mt-[12px] w-full px-[6px] py-[6px] text-[0.85em]" onclick={loadNextQuestion}>Next Problem →</button>
-				{/if}
-			{:else}
-				<p>Loading question...</p>
+			{#if gameState.directedMigrationReady}
+				<button class="btn secondary" onclick={directedMigrate} disabled={!gameState.selectedCountry}>Migrate here · 20 DNA</button>
 			{/if}
 		</div>
 	</div>
-{/if}
+
+	<aside class="log">
+		<h3 class="eyebrow">Log</h3>
+
+		{#if logEntries.length === 0}
+			<p class="log-empty">Nothing yet.</p>
+		{/if}
+
+		<ol class="num">
+			{#each logEntries as entry}
+				<li class:event={entry.kind === 'event'}>
+					<span class="log-year">{entry.year.toLocaleString()}</span>
+					<span>{entry.msg}</span>
+				</li>
+			{/each}
+		</ol>
+	</aside>
+</section>
 
 <!-- ─── Evolution Overlay ──────────────────────────────────────────────────── -->
 
+{#snippet branch(trait)}
+	{@const kids = childrenOf(trait.id)}
+	{@const status = traitStatus(trait)}
+
+	<div class="t-row">
+		<button class="t-node {status}" class:selected={selectedTraitId === trait.id} onclick={() => (selectedTraitId = trait.id)}>
+			<span>{trait.name}</span>
+			<span class="t-cost">{status === 'owned' ? '✓' : trait.cost}</span>
+		</button>
+
+		{#if kids.length}
+			<div class="t-kids">
+				{#each kids as kid}
+					<div class="t-kid">{@render branch(kid)}</div>
+				{/each}
+			</div>
+		{/if}
+	</div>
+{/snippet}
+
 {#if showEvolution}
-	<div id="evolution-overlay">
-		<h1>EVOLUTION TREE</h1>
+	<div class="evolve">
+		<div class="evolve-main">
+			<div class="evolve-head">
+				<h1 class="display evolve-title">Evolve</h1>
+				<div class="evolve-dna num">DNA <b>{Math.floor(gameState.dna)}</b></div>
+			</div>
 
-		<div id="trait-container">
-			{#each availableTraits as trait}
-				{@const isPurchased = gameState.traits.includes(trait.id)}
-				{@const prereqsMet = (trait.requires || []).every((r) => gameState.traits.includes(r))}
-				{@const canAfford = gameState.dna >= trait.cost}
-				{@const isLocked = !prereqsMet}
-				{@const prereqNames = (trait.requires || []).map((r) => availableTraits.find((x) => x.id === r)?.name ?? r)}
+			<div class="t-roots">
+				{#each rootTraits as root}
+					{@render branch(root)}
+				{/each}
+			</div>
 
-				<div
-					class="trait-card"
-					style="opacity:{isLocked ? 0.4 : 1};border-color:{isPurchased ? 'gray' : isLocked ? '#555' : 'var(--accent)'}"
-				>
-					<h3 style="margin:0 0 6px;font-size:0.95em">{trait.name}</h3>
-
-					<p
-						style="font-size:0.72em;color:#aaa;line-height:1.4;margin-bottom:8px"
-					>{trait.desc}</p>
-
-					{#if isLocked}
-						<p style="color:#ff9900;font-size:0.75em">🔒 Requires: {prereqNames.join(', ')}</p>
-					{/if}
-
-					<p style="margin:4px 0"><strong>Cost: {trait.cost} DNA</strong></p>
-
-					<button
-						onclick={() => buyTrait(trait.id, trait.cost)}
-						disabled={isPurchased || !canAfford || isLocked}
-					>{isPurchased ? '✓ Evolved' : isLocked ? '🔒 Locked' : 'Evolve'}</button>
-				</div>
-			{/each}
+			<div class="evolve-foot">
+				<button class="btn secondary" onclick={closeEvolve}>Back to map</button>
+			</div>
 		</div>
 
-		<button onclick={closeEvolve} style="margin-top:30px">Back to Map</button>
+		<aside class="evolve-detail">
+			{#if selectedTrait}
+				{@const status = traitStatus(selectedTrait)}
+
+				<h2 class="display detail-name">{selectedTrait.name}</h2>
+
+				<div class="eyebrow detail-meta">
+					{selectedTrait.cost} DNA{#if selectedTrait.requires.length} · after {selectedTrait.requires.map(traitName).join(', ')}{/if}
+				</div>
+
+				<p class="detail-desc">{selectedTrait.desc}</p>
+
+				<ul class="effects num">
+					{#each fxRows(selectedTrait) as [label, value]}
+						<li><span>{label}</span><b>{value}</b></li>
+					{/each}
+				</ul>
+
+				<button class="btn accent detail-buy" onclick={() => buyTrait(selectedTrait.id, selectedTrait.cost)} disabled={status !== 'available'}>
+					{#if status === 'owned'}
+						Evolved
+					{:else if status === 'locked'}
+						Needs {selectedTrait.requires.map(traitName).join(', ')} first
+					{:else if status === 'expensive'}
+						Need {Math.ceil(selectedTrait.cost - gameState.dna)} more DNA
+					{:else}
+						Evolve for {selectedTrait.cost} DNA
+					{/if}
+				</button>
+			{:else}
+				<p class="detail-desc">Pick a trait to see what it does.</p>
+			{/if}
+		</aside>
 	</div>
 {/if}
 
 <!-- ─── Endgame Overlay ────────────────────────────────────────────────────── -->
 
 {#if showEndgame}
-	<div id="endgame-overlay">
-		<h1
-			style="color:{endgameData.won ? 'var(--accent)' : 'var(--danger)'}"
-		>{endgameData.title}</h1>
+	<div class="hero endgame" style="--earth:url({EARTH_IMAGE_URL})">
+		<div class="hero-inner">
+			<h1 class="display hero-title" class:lost={!endgameData.won}>{endgameData.title}</h1>
+			<p class="end-lead">{endgameData.lead}</p>
+			<p class="end-body">{endgameData.body}</p>
 
-		<div class="stats">{@html endgameData.stats}</div>
-		<p>{@html endgameData.msg}</p>
+			<dl class="end-stats num">
+				{#each endgameData.stats as [label, value]}
+					<div><dt>{label}</dt><dd>{value}</dd></div>
+				{/each}
+			</dl>
 
-		<button
-			onclick={() => location.reload()}
-			style="margin-top:30px;font-size:1em"
-		>↺ Play Again</button>
+			<button class="btn accent" onclick={() => location.reload()}>Play again</button>
+		</div>
 	</div>
 {/if}
 
 <style>
-	:global(:root) {
-		--panel-bg: rgba(20, 25, 35, 0.9);
-		--accent: #00ffcc;
-		--danger: #ff4d4d;
-		--selected: #fffb00;
-		--text: #e0e0e0;
-	}
-
 	:global(body) {
-		margin: 0;
-		background-color: #0a0e14;
-		color: var(--text);
-		/* font-family: "Garamond", "Georgia", "Playfair Display", serif; */
-		  font-family: "Lato", "Helvetica Neue", Helvetica, Arial, sans-serif;
-
 		overflow: hidden;
 		height: 100vh;
 		display: flex;
 		flex-direction: column;
-	}
-
-	:global(h1) {
-		font-size: 56px;
-		letter-spacing: -1.68px;
-		margin: 32px 0;
-		color: #f5f5f5;
-	}
-
-	:global(h2) {
-		font-size: 24px;
-		line-height: 118%;
-		letter-spacing: -0.24px;
-		margin: 0 0 8px;
-		color: #f5f5f5;
-	}
-
-	:global(p) {
-		margin: 0;
-	}
-
-	:global(button) {
-		background: transparent;
-		border: 1px solid rgba(0, 255, 204, 0.8);
-		color: #00ffcc;
-		padding: 10px 20px;
-		cursor: pointer;
-		text-transform: uppercase;
-		letter-spacing: 1px;
-		transition: 0.3s;
-	}
-
-	:global(button:hover) {
-		background: #00ffcc;
-		color: #000;
-	}
-
-	:global(button:disabled) {
-		border-color: #444;
-		color: #444;
-		cursor: not-allowed;
-	}
-
-	:global(button:disabled:hover) {
-		background: transparent;
-	}
-
-	.overlay {
-		position: fixed;
-		top: 0;
-		left: 0;
-		width: 100%;
-		height: 100%;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		text-align: center;
-		background: rgba(0, 0, 0, 0.97);
-	}
-
-	.ui-panel {
-		background: var(--panel-bg);
-		backdrop-filter: blur(10px);
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		padding: 20px;
-		pointer-events: all;
-		box-sizing: border-box;
-	}
-
-	.input-field {
-		background: rgba(255, 255, 255, 0.05);
-		border: 1px solid rgba(0, 255, 204, 0.8);
-		color: #00ffcc;
-		padding: 10px 18px;
-		font-size: 1.2em;
-		text-align: center;
-		letter-spacing: 2px;
-		width: 280px;
-		margin: 20px 0 10px;
-		outline: none;
 	}
 
 	:global(#app) {
@@ -1334,29 +1292,401 @@
 		overflow: hidden;
 	}
 
-	#top-bar {
-		height: 60px;
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		padding: 0 40px;
-		border-bottom: 2px solid var(--accent);
-		width: 100%;
-		box-sizing: border-box;
+	:global(.num) {
+		font-variant-numeric: tabular-nums;
 	}
 
-	:global(.stat-value) {
-		color: var(--accent);
-		font-weight: bold;
-		font-size: 1.2em;
+	:global(.display) {
+		font-stretch: 125%;
+		font-weight: 900;
+		letter-spacing: -0.01em;
+		text-transform: uppercase;
+		line-height: 0.92;
+		margin: 0;
 	}
 
-	#map-container {
-		flex: 1;
+	:global(.eyebrow) {
+		font-size: 11px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--muted);
+	}
+
+	/* ── Buttons ── */
+	:global(.btn) {
+		font: 600 13px var(--font);
+		border-radius: 3px;
+		padding: 9px 16px;
+		cursor: pointer;
+		border: 1.5px solid var(--ink);
+		background: var(--ink);
+		color: var(--paper);
+		transition: background 0.15s, color 0.15s, border-color 0.15s;
+		white-space: nowrap;
+	}
+
+	:global(.btn:hover:not(:disabled)) {
+		background: #2d2a25;
+	}
+
+	:global(.btn.secondary) {
+		background: transparent;
+		color: var(--ink);
+	}
+
+	:global(.btn.secondary:hover:not(:disabled)) {
+		background: var(--ink);
+		color: var(--paper);
+	}
+
+	:global(.btn.accent) {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: #fff;
+	}
+
+	:global(.btn.accent:hover:not(:disabled)) {
+		background: var(--accent-dark);
+		border-color: var(--accent-dark);
+	}
+
+	:global(.btn:disabled) {
+		background: transparent;
+		color: var(--faint);
+		border-color: var(--rule);
+		cursor: not-allowed;
+	}
+
+	:global(.btn:focus-visible),
+	.t-node:focus-visible,
+	.strategy-card:focus-visible,
+	.quiz-option:focus-visible {
+		outline: 3px solid var(--accent);
+		outline-offset: 2px;
+	}
+
+	.link-btn {
+		background: none;
+		border: 0;
+		font: 600 12px var(--font);
+		color: var(--muted);
+		cursor: pointer;
+		padding: 4px;
+	}
+
+	.link-btn:hover {
+		color: var(--ink);
+	}
+
+	/* ── Title + endgame ── */
+	.hero {
+		position: fixed;
+		inset: 0;
 		overflow: hidden;
-		cursor: crosshair;
+		background: var(--ocean);
+		color: #fff;
+	}
+
+	/* Zoomed-in crop of the satellite image (Africa, Europe, Middle East). */
+	.hero::before {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: var(--earth) 50% 50% / cover no-repeat;
+		transform: scale(1.7);
+		transform-origin: 62% 34%;
+	}
+
+	.hero::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(90deg, rgba(4, 10, 22, 0.9) 0%, rgba(4, 10, 22, 0.6) 45%, rgba(4, 10, 22, 0.1) 80%);
+	}
+
+	.hero-inner {
+		z-index: 1;
+	}
+
+	.hero-inner {
+		position: absolute;
+		left: clamp(24px, 6vw, 88px);
+		bottom: clamp(32px, 9vh, 96px);
+		right: 24px;
+	}
+
+	.hero-title {
+		font-size: clamp(56px, 11vw, 148px);
+		margin-bottom: 32px;
+	}
+
+	.hero-title.lost {
+		color: #ff8a65;
+	}
+
+	.hero-label {
+		display: block;
+		font-size: 11px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: rgba(255, 255, 255, 0.7);
+		margin-bottom: 8px;
+	}
+
+	.hero-row {
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+
+	.hero-input {
+		font: italic 500 17px var(--font);
+		border: 0;
+		background: var(--paper);
+		border-radius: 3px;
+		padding: 10px 14px;
+		width: min(320px, 100%);
+		color: var(--ink);
+		outline: none;
+	}
+
+	.hero-input:focus {
+		box-shadow: 0 0 0 3px var(--accent);
+	}
+
+	.hero .btn:disabled {
+		color: rgba(255, 255, 255, 0.45);
+		border-color: rgba(255, 255, 255, 0.25);
+	}
+
+	.endgame {
+		z-index: 3000;
+	}
+
+	.end-lead {
+		font-size: 22px;
+		font-weight: 600;
+		margin: 0 0 6px;
+		max-width: 560px;
+	}
+
+	.end-body {
+		color: rgba(255, 255, 255, 0.75);
+		max-width: 520px;
+		margin: 0 0 24px;
+		font-size: 15px;
+	}
+
+	.end-stats {
+		display: flex;
+		gap: 36px;
+		margin: 0 0 28px;
+	}
+
+	.end-stats dt {
+		font-size: 11px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: rgba(255, 255, 255, 0.6);
+	}
+
+	.end-stats dd {
+		margin: 2px 0 0;
+		font-size: 18px;
+		font-weight: 700;
+	}
+
+	/* ── Strategy ── */
+	.strategy {
+		position: fixed;
+		inset: 0;
+		background: var(--paper);
+		overflow-y: auto;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 40px 24px;
+	}
+
+	.strategy-inner {
+		width: 100%;
+		max-width: 1080px;
+	}
+
+	.strategy-kicker {
+		font-size: 18px;
+		font-weight: 500;
+		color: var(--muted);
+		margin: 0 0 10px;
+	}
+
+	.strategy-title {
+		font-size: clamp(36px, 5vw, 64px);
+		margin-bottom: 36px;
+	}
+
+	.strategy-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+		gap: 16px;
+	}
+
+	.strategy-card {
+		display: flex;
+		flex-direction: column;
+		text-align: left;
+		background: var(--surface);
+		border: 1.5px solid var(--ink);
+		border-radius: 4px;
+		padding: 20px;
+		cursor: pointer;
+		color: var(--ink);
+		font: inherit;
+		transition: transform 0.15s, box-shadow 0.15s;
+	}
+
+	.strategy-card:hover {
+		transform: translateY(-2px);
+		box-shadow: 4px 4px 0 var(--ink);
+	}
+
+	.curve {
+		width: 100%;
+		height: 96px;
+		margin-bottom: 16px;
+		overflow: visible;
+	}
+
+	.curve line {
+		stroke: var(--faint);
+		stroke-width: 1;
+	}
+
+	.curve path {
+		fill: none;
+		stroke: var(--accent);
+		stroke-width: 3;
+		stroke-linecap: round;
+	}
+
+	.curve text {
+		font: 600 8px var(--font);
+		fill: var(--muted);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+
+	.strategy-name {
+		font-size: 30px;
+	}
+
+	.strategy-sub {
+		font-size: 12px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--muted);
+		margin: 6px 0 12px;
+	}
+
+	.strategy-desc {
+		font-size: 14px;
+		line-height: 1.5;
+		margin-bottom: 10px;
+	}
+
+	.strategy-starts {
+		font-size: 13px;
+		color: var(--muted);
+		margin-bottom: 18px;
+	}
+
+	.strategy-cta {
+		margin-top: auto;
+		font-weight: 700;
+		font-size: 13px;
+		color: var(--accent-dark);
+	}
+
+	/* ── Top bar ── */
+	.topbar {
+		display: flex;
+		align-items: center;
+		gap: 24px;
+		padding: 12px 24px;
+		background: var(--paper);
+		flex-shrink: 0;
+	}
+
+	.wordmark {
+		font-size: 22px;
+		white-space: nowrap;
+	}
+
+	.species {
+		font-size: 17px;
+		font-weight: 500;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+
+	.tag {
+		font-size: 11px;
+		font-weight: 700;
+		background: var(--ink);
+		color: var(--paper);
+		border-radius: 2px;
+		padding: 2px 6px;
+		margin-left: 6px;
+		vertical-align: 2px;
+		text-transform: uppercase;
+	}
+
+	.stats {
+		margin: 0 0 0 auto;
+		display: flex;
+		gap: 22px;
+		align-items: baseline;
+	}
+
+	.stat {
+		display: flex;
+		align-items: baseline;
+		gap: 6px;
+	}
+
+	.stat dt {
+		font-size: 11px;
+		font-weight: 700;
+		color: var(--muted);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	.stat dd {
+		margin: 0;
+		font-size: 20px;
+		font-weight: 800;
+		font-stretch: 112%;
+	}
+
+	.stat.dna dd {
+		color: var(--accent);
+	}
+
+	/* ── Map ── */
+	#map-container {
 		position: relative;
+		flex: 1;
 		min-height: 0;
+		overflow: hidden;
+		background: var(--ocean);
+		cursor: crosshair;
 	}
 
 	#map-container svg {
@@ -1365,218 +1695,593 @@
 		display: block;
 	}
 
-	#bottom-bar {
-		display: flex;
-		height: 200px;
-		border-top: 2px solid var(--accent);
-		padding-bottom: 30px;
-		width: 100%;
-		box-sizing: border-box;
+	:global(.earth) {
+		opacity: 0;
+		transition: opacity 0.6s ease;
 	}
 
-	#side-panel {
-		flex: 3;
-		height: 100%;
-		border-top: none;
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		justify-content: space-between;
-		gap: 15px;
-	}
-
-	#side-panel h2 {
-		flex: 1 1 100%;
-		margin: 0;
-	}
-
-	#side-panel p {
-		margin: 0;
-		flex: 1 1 150px;
-		font-size: 0.9em;
-	}
-
-	#log-container {
-		flex: 1;
-		background: rgba(0, 0, 0, 0.3);
-		border-left: 1px solid rgba(255, 255, 255, 0.1);
-		padding: 10px;
-		font-size: 0.8em;
-		overflow-y: auto;
-		min-width: 0;
-	}
-
-	:global(.log-entry) {
-		border-left: 2px solid var(--accent);
-		padding-left: 5px;
-		margin-bottom: 5px;
-		color: #bbb;
+	:global(.earth.loaded) {
+		opacity: 1;
 	}
 
 	:global(.country) {
-		stroke: rgba(255, 255, 255, 0.1);
+		fill: transparent;
+		stroke: rgba(255, 255, 255, 0.28);
 		stroke-width: 0.5px;
 		cursor: pointer;
-		transition: fill 0.3s ease, stroke 0.3s;
+		transition: fill 0.3s ease, stroke 0.2s;
+	}
+
+	/* If the satellite image can't load, fall back to flat land so the map is still playable. */
+	:global(.no-imagery .country) {
+		fill: #3c4a37;
 	}
 
 	:global(.country:hover) {
-		stroke: var(--accent);
-		stroke-width: 1.5px;
+		stroke: #fff;
+		stroke-width: 1.2px;
 	}
 
 	:global(.country.occupied) {
-		fill: var(--danger) !important;
+		fill: rgba(228, 87, 46, 0.6);
+		stroke: #ffb59c;
+		stroke-width: 0.8px;
 	}
 
 	:global(.country.selected-highlight) {
-		stroke: var(--selected) !important;
-		stroke-width: 2.5px !important;
+		stroke: #fff;
+		stroke-width: 2px;
 	}
 
-	:global(.ocean) {
-		fill: #011f2e;
+	.toast {
+		position: absolute;
+		top: 16px;
+		left: 16px;
+		max-width: calc(100% - 32px);
+		background: var(--paper);
+		color: var(--ink);
+		border-radius: 3px;
+		padding: 8px 12px;
+		font-size: 13px;
+		display: flex;
+		gap: 10px;
+		align-items: baseline;
+		box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+		z-index: 5;
+		pointer-events: none;
+	}
+
+	.toast.start-hint {
+		font-weight: 600;
+	}
+
+	.toast.event {
+		border-left: 4px solid currentColor;
+	}
+
+	.toast b {
+		font-weight: 800;
+		font-stretch: 112%;
+		text-transform: uppercase;
+		font-size: 12px;
+		white-space: nowrap;
+	}
+
+	.toast span {
+		color: var(--ink);
+	}
+
+	.tone-info { color: var(--info); }
+	.tone-danger { color: var(--danger); }
+	.tone-warn { color: var(--warn); }
+	.tone-good { color: var(--good); }
+
+	.quiz-btn {
+		position: absolute;
+		right: 16px;
+		bottom: 16px;
+		z-index: 5;
+	}
+
+	/* ── Quiz ── */
+	.quiz {
+		position: absolute;
+		right: 16px;
+		bottom: 16px;
+		width: 380px;
+		max-width: calc(100% - 32px);
+		max-height: calc(100% - 32px);
+		display: flex;
+		flex-direction: column;
+		background: var(--paper);
+		border-radius: 4px;
+		box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+		z-index: 6;
 		cursor: default;
 	}
 
-	#summon-quiz-btn {
-		position: fixed;
-		bottom: 250px;
-		right: 20px;
-		z-index: 1400;
-		box-shadow: 0 0 10px rgba(0, 255, 204, 0.3);
-	}
-
-	#quiz-popup {
-		position: fixed;
-		bottom: 250px;
-		right: 20px;
-		width: 340px;
-		max-height: 400px;
-		background: rgba(15, 22, 33, 0.95);
-		border: 2px solid var(--accent);
-		box-shadow: 0 0 15px rgba(0, 255, 204, 0.2);
-		z-index: 1500;
+	.quiz-head {
 		display: flex;
-		flex-direction: column;
-		border-radius: 4px;
-	}
-
-	.quiz-header {
-		background: rgba(0, 255, 204, 0.1);
-		padding: 10px 15px;
-		display: flex;
-		justify-content: space-between;
 		align-items: center;
-		border-bottom: 1px solid rgba(0, 255, 204, 0.3);
+		justify-content: space-between;
+		padding: 10px 12px 10px 16px;
+		border-bottom: 1.5px solid var(--ink);
+	}
+
+	.quiz-title {
+		font-weight: 900;
+		font-stretch: 125%;
+		text-transform: uppercase;
+		font-size: 15px;
 	}
 
 	.quiz-body {
-		padding: 15px;
+		padding: 14px 16px 16px;
 		overflow-y: auto;
-		font-size: 0.85em;
-		line-height: 1.4;
+		font-size: 13.5px;
+		line-height: 1.5;
 	}
 
-	:global(.quiz-option-btn) {
-		display: block;
-		width: 100%;
+	.quiz-q {
+		font-weight: 600;
+		margin: 0 0 12px;
+	}
+
+	.quiz-options {
+		display: grid;
+		gap: 6px;
+	}
+
+	.quiz-option {
+		display: flex;
+		gap: 10px;
+		align-items: flex-start;
 		text-align: left;
-		background: rgba(255, 255, 255, 0.03);
-		border: 1px solid rgba(255, 255, 255, 0.1);
-		color: var(--text);
-		padding: 8px 12px;
-		margin: 6px 0;
-		font-size: 0.9em;
+		background: var(--surface);
+		border: 1.5px solid var(--rule);
+		border-radius: 3px;
+		padding: 8px 10px;
+		font: inherit;
+		color: var(--ink);
 		cursor: pointer;
-		text-transform: none;
-		letter-spacing: 0;
-		transition: 0.2s;
 	}
 
-	:global(.quiz-option-btn:hover) {
-		background: rgba(0, 255, 204, 0.1);
-		border-color: var(--accent);
-		color: #fff;
+	.quiz-option:hover:not(:disabled) {
+		border-color: var(--ink);
 	}
 
-	#evolution-overlay {
-		position: fixed;
-		top: 0;
-		left: 0;
+	.quiz-option:disabled {
+		cursor: default;
+		color: var(--muted);
+	}
+
+	.quiz-option .letter {
+		font-weight: 800;
+		min-width: 12px;
+	}
+
+	.quiz-option.correct {
+		border-color: var(--good);
+		background: #e7eedf;
+		color: var(--ink);
+	}
+
+	.quiz-option.wrong {
+		border-color: var(--danger);
+		background: #f6e1da;
+		color: var(--ink);
+	}
+
+	.quiz-feedback {
+		margin-top: 12px;
+		padding-left: 10px;
+		border-left: 3px solid var(--danger);
+	}
+
+	.quiz-feedback.correct {
+		border-color: var(--good);
+	}
+
+	.quiz-feedback p {
+		margin: 4px 0 0;
+		color: var(--muted);
+	}
+
+	.quiz-next {
+		margin-top: 14px;
 		width: 100%;
-		height: 100%;
-		background: rgba(10, 14, 20, 0.95);
-		z-index: 2000;
+	}
+
+	/* ── Bottom panel ── */
+	.bottom {
+		display: grid;
+		grid-template-columns: 1fr minmax(280px, 360px);
+		background: var(--paper);
+		height: 188px;
+		flex-shrink: 0;
+	}
+
+	.region {
+		padding: 16px 24px;
 		display: flex;
 		flex-direction: column;
-		align-items: center;
-		justify-content: center;
+		min-width: 0;
+		overflow: hidden;
 	}
 
-	#trait-container {
+	.region-head {
 		display: flex;
+		align-items: center;
+		gap: 12px;
+		min-width: 0;
+	}
+
+	.region-name {
+		font-size: 34px;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		padding-top: 2px;
+	}
+
+	.region-name.muted {
+		color: var(--faint);
+		font-size: 26px;
+	}
+
+	.region-hint {
+		margin: 10px 0 auto;
+		color: var(--muted);
+	}
+
+	.pill {
+		font-size: 11px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: #fff;
+		background: var(--accent);
+		padding: 3px 7px;
+		border-radius: 2px;
+		flex-shrink: 0;
+	}
+
+	.facts {
+		display: flex;
+		gap: 36px;
+		margin: 14px 0 auto;
+	}
+
+	.facts dt {
+		font-size: 11px;
+		font-weight: 700;
+		color: var(--muted);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	.facts dd {
+		margin: 1px 0 0;
+		font-size: 16px;
+		font-weight: 600;
+	}
+
+	.actions {
+		display: flex;
+		gap: 8px;
 		flex-wrap: wrap;
-		justify-content: center;
-		max-height: 70vh;
+	}
+
+	.log {
+		padding: 14px 20px;
+		overflow-y: auto;
+		border-left: 1.5px solid var(--ink);
+		min-width: 0;
+	}
+
+	.log h3 {
+		margin: 0 0 6px;
+	}
+
+	.log ol {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		font-size: 13px;
+	}
+
+	.log li {
+		display: grid;
+		grid-template-columns: 58px 1fr;
+		gap: 8px;
+		padding: 3px 0;
+	}
+
+	.log-year {
+		color: var(--faint);
+	}
+
+	.log li.event span:last-child {
+		color: var(--info);
+		font-weight: 600;
+	}
+
+	.log-empty {
+		color: var(--faint);
+		margin: 0;
+	}
+
+	/* ── Evolution tree ── */
+	.evolve {
+		position: fixed;
+		inset: 0;
+		z-index: 2000;
+		background: var(--paper);
+		display: grid;
+		grid-template-columns: 1fr 360px;
+	}
+
+	.evolve-main {
+		padding: 32px 40px;
+		overflow: auto;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.evolve-head {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 24px;
+		margin-bottom: 28px;
+	}
+
+	.evolve-title {
+		font-size: 48px;
+	}
+
+	.evolve-dna {
+		font-size: 13px;
+		font-weight: 700;
+		color: var(--muted);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	.evolve-dna b {
+		font-size: 30px;
+		font-weight: 800;
+		font-stretch: 112%;
+		color: var(--accent);
+		margin-left: 6px;
+		letter-spacing: 0;
+	}
+
+	.t-roots {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		align-items: flex-start;
+	}
+
+	.t-row {
+		display: flex;
+		align-items: center;
+	}
+
+	.t-kids {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		padding-left: 28px;
+	}
+
+	.t-kids::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		top: 50%;
+		width: 14px;
+		border-top: 1.5px solid var(--ink);
+	}
+
+	.t-kid {
+		position: relative;
+		display: flex;
+		align-items: center;
+		padding: 4px 0;
+	}
+
+	.t-kid::before {
+		content: '';
+		position: absolute;
+		left: -14px;
+		top: 50%;
+		width: 14px;
+		border-top: 1.5px solid var(--ink);
+	}
+
+	.t-kid::after {
+		content: '';
+		position: absolute;
+		left: -14px;
+		top: 0;
+		bottom: 0;
+		border-left: 1.5px solid var(--ink);
+	}
+
+	.t-kid:first-child::after {
+		top: 50%;
+	}
+
+	.t-kid:last-child::after {
+		bottom: 50%;
+	}
+
+	.t-kid:only-child::after {
+		display: none;
+	}
+
+	.t-node {
+		width: 210px;
+		height: 46px;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		padding: 0 12px;
+		border: 1.5px solid var(--ink);
+		border-radius: 3px;
+		background: var(--surface);
+		font: 600 13px var(--font);
+		color: var(--ink);
+		cursor: pointer;
+		text-align: left;
+		flex-shrink: 0;
+	}
+
+	.t-node:hover {
+		background: #fff;
+	}
+
+	.t-cost {
+		font-size: 12px;
+		font-weight: 700;
+		color: var(--muted);
+	}
+
+	.t-node.owned {
+		background: var(--ink);
+		color: var(--paper);
+	}
+
+	.t-node.owned .t-cost {
+		color: var(--paper);
+	}
+
+	.t-node.expensive .t-cost {
+		color: var(--danger);
+	}
+
+	.t-node.locked {
+		border-style: dashed;
+		border-color: var(--faint);
+		color: var(--faint);
+		background: transparent;
+	}
+
+	.t-node.locked .t-cost {
+		color: var(--faint);
+	}
+
+	.t-node.selected {
+		outline: 3px solid var(--accent);
+		outline-offset: 2px;
+	}
+
+	.evolve-foot {
+		margin-top: auto;
+		padding-top: 28px;
+	}
+
+	.evolve-detail {
+		background: var(--surface);
+		border-left: 1.5px solid var(--ink);
+		padding: 32px 28px;
+		display: flex;
+		flex-direction: column;
 		overflow-y: auto;
 	}
 
-	:global(.trait-card) {
-		background: #1a1f29;
-		border: 1px solid var(--accent);
-		padding: 15px;
-		width: 260px;
-		text-align: center;
-		margin: 10px;
-		transition: 0.3s;
-		vertical-align: top;
+	.detail-name {
+		font-size: 28px;
+		margin-bottom: 8px;
 	}
 
-	#endgame-overlay {
-		position: fixed;
-		top: 0;
-		left: 0;
-		width: 100%;
-		height: 100%;
-		background: rgba(10, 14, 20, 0.97);
-		z-index: 3000;
+	.detail-meta {
+		margin-bottom: 16px;
+	}
+
+	.detail-desc {
+		margin: 0 0 18px;
+		font-size: 14.5px;
+		line-height: 1.55;
+	}
+
+	.effects {
+		list-style: none;
+		padding: 0;
+		margin: 0 0 auto;
+		font-size: 13px;
+	}
+
+	.effects li {
 		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		text-align: center;
+		justify-content: space-between;
+		padding: 7px 0;
+		border-top: 1px solid var(--rule);
 	}
 
-	#endgame-overlay h1 {
-		font-size: 3em;
-		letter-spacing: 6px;
-		margin-bottom: 10px;
+	.effects li:last-child {
+		border-bottom: 1px solid var(--rule);
 	}
 
-	#endgame-overlay p {
-		font-size: 1.1em;
-		color: #aaa;
-		max-width: 500px;
-		line-height: 1.7;
+	.effects b {
+		font-weight: 700;
 	}
 
-	.stats {
-		margin: 20px 0;
-		font-size: 1em;
-		color: var(--accent);
+	.detail-buy {
+		margin-top: 24px;
+		padding: 13px;
+		font-size: 14px;
+		white-space: normal;
 	}
 
-	#event-banner {
-		position: fixed;
-		top: 80px;
-		left: 50%;
-		transform: translateX(-50%);
-		color: #000;
-		padding: 8px 24px;
-		border-radius: 20px;
-		font-weight: bold;
-		z-index: 999;
-		font-size: 1.1em;
+	/* ── Narrow screens ── */
+	@media (max-width: 900px) {
+		.topbar {
+			flex-wrap: wrap;
+			gap: 8px 16px;
+			padding: 10px 16px;
+		}
+
+		/* Single line so a longer year count can't add a row and shift the map. */
+		.stats {
+			margin-left: 0;
+			width: 100%;
+			gap: 14px;
+			flex-wrap: nowrap;
+			overflow: hidden;
+		}
+
+		/* Fixed height so the map doesn't jump when a country is (de)selected. */
+		.bottom {
+			grid-template-columns: 1fr;
+			height: 152px;
+		}
+
+		.log {
+			display: none;
+		}
+
+		.region {
+			padding: 14px 16px;
+		}
+
+		.evolve {
+			grid-template-columns: 1fr;
+			grid-template-rows: 1fr auto;
+		}
+
+		.evolve-main {
+			padding: 24px 16px;
+		}
+
+		.evolve-detail {
+			border-left: 0;
+			border-top: 1.5px solid var(--ink);
+			max-height: 45vh;
+			padding: 20px 16px;
+		}
 	}
 </style>

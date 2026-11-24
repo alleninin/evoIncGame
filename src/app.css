@@ -1,10 +1,24 @@
 @import 'tailwindcss';
 
 :root {
-	color-scheme: dark;
-	/* font-family: "Garamond", "Georgia", "Playfair Display", serif; */
-  font-family: "Lato", "Helvetica Neue", Helvetica, Arial, sans-serif;
-	line-height: 1.5;
+	color-scheme: light;
+	--paper: #f2eee6;
+	--surface: #faf8f3;
+	--ink: #161512;
+	--muted: #6a645a;
+	--faint: #a39c90;
+	--rule: #d8d1c4;
+	--accent: #e4572e;
+	--accent-dark: #c4451f;
+	--ocean: #071630;
+	--info: #1d5f8a;
+	--danger: #b4361a;
+	--warn: #a5761b;
+	--good: #3f6b2a;
+	--font: 'Archivo', 'Helvetica Neue', Arial, sans-serif;
+
+	font-family: var(--font);
+	line-height: 1.45;
 	font-weight: 400;
 	font-synthesis: none;
 	text-rendering: optimizeLegibility;
@@ -14,8 +28,9 @@
 
 body {
 	margin: 0;
-	background-color: #0a0e14;
-	color: #e0e0e0;
+	background: var(--paper);
+	color: var(--ink);
+	font-size: 14px;
 }
 
 #app {
